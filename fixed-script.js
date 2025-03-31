@@ -13,6 +13,9 @@ jQuery(document).ready(function($) {
         var format = $("#fixed-format-select-" + id).val();
         var resultBox = $("#fixed-optimize-result-" + id);
         
+        // Проверяем, есть ли у нас информация о существующем оптимизированном изображении
+        var hasExisting = button.data("has-optimized") === "yes";
+        
         // Отключаем кнопку и показываем, что идет процесс
         button.prop("disabled", true).text("Оптимизация...");
         
@@ -25,13 +28,17 @@ jQuery(document).ready(function($) {
                 id: id,
                 quality: quality,
                 format: format,
-                nonce: fixedOptimizerData.nonce
+                nonce: fixedOptimizerData.nonce,
+                update_existing: hasExisting
             },
             success: function(response) {
                 button.prop("disabled", false).text("Оптимизировать");
                 
                 if (response.success) {
                     resultBox.html(response.data.message).css("border-left-color", "#46b450").show();
+                    
+                    // Обновляем статус оптимизации
+                    button.data("has-optimized", "yes");
                     
                     // Добавляем кнопку обновления страницы
                     if (!$("#fixed-refresh-button-" + id).length) {
@@ -46,25 +53,35 @@ jQuery(document).ready(function($) {
                         button.after(refreshButton);
                     }
                     
+                    // Обновляем отображение оптимизационной информации
+                    if (response.data.optimization_info) {
+                        if ($("#fixed-optimization-info-" + id).length) {
+                            $("#fixed-optimization-info-" + id).html(response.data.optimization_info);
+                        } else {
+                            $("<div>")
+                                .attr("id", "fixed-optimization-info-" + id)
+                                .addClass("fixed-optimization-info")
+                                .html(response.data.optimization_info)
+                                .insertBefore(resultBox);
+                        }
+                    }
+                    
                     // Обновляем отображение изображения в медиа библиотеке
                     if (response.data.attachment_id && response.data.image_url) {
                         // Обновляем предпросмотр изображения, если находимся на странице медиа
-                        var $thumbnail = $(".attachment[data-id='" + response.data.attachment_id + "'] .thumbnail");
+                        var $thumbnail = $(".attachment[data-id='" + response.data.original_id + "'] .thumbnail");
                         if ($thumbnail.length) {
                             // Добавляем timestamp для избежания кеширования
                             var randomParam = "?t=" + new Date().getTime();
-                            $thumbnail.find("img").attr("src", response.data.image_url + randomParam);
+                            
+                            // Если у нас есть бейдж оптимизации, обновляем его, иначе добавляем
+                            if (!$thumbnail.find(".fixed-optimization-badge").length) {
+                                $thumbnail.append("<div class='fixed-optimization-badge' title='Оптимизировано'>✓</div>");
+                            }
                         }
                         
-                        // Обновляем предпросмотр в деталях
-                        var $detailImage = $(".attachment-details .details-image");
-                        if ($detailImage.length) {
-                            var randomParam = "?t=" + new Date().getTime();
-                            $detailImage.attr("src", response.data.image_url + randomParam);
-                        }
-                        
-                        // Обновляем медиатеку для отображения нового изображения
-                        refreshMediaLibrary(response.data.attachment_id);
+                        // Обновляем медиатеку
+                        refreshMediaLibrary(response.data.original_id);
                     }
                 } else {
                     resultBox.html("Ошибка: " + response.data).css("border-left-color", "#dc3232").show();
@@ -77,8 +94,8 @@ jQuery(document).ready(function($) {
         });
     });
     
-    // Функция для обновления медиатеки и отображения нового изображения
-    function refreshMediaLibrary(newAttachmentId) {
+    // Функция для обновления медиатеки
+    function refreshMediaLibrary(attachmentId) {
         // Если мы находимся в медиа библиотеке, обновляем содержимое
         if (wp.media && wp.media.frame) {
             // Используем WordPress Media API для обновления библиотеки
@@ -90,25 +107,25 @@ jQuery(document).ready(function($) {
                 // Принудительное обновление коллекции
                 library.more(true).reset();
                 
-                // Если у нас есть ID нового вложения, ждем пока библиотека загрузится и выбираем его
-                if (newAttachmentId) {
+                // Если у нас есть ID вложения, ждем пока библиотека загрузится и выбираем его
+                if (attachmentId) {
                     var checkLibrary = setInterval(function() {
-                        var attachment = wp.media.attachment(newAttachmentId);
+                        var attachment = wp.media.attachment(attachmentId);
                         if (attachment.id) {
                             clearInterval(checkLibrary);
                             
-                            // Выделение нового элемента
+                            // Выделение элемента
                             selection.reset([attachment]);
                             
-                            // Прокручиваем к новому элементу
+                            // Прокручиваем к элементу
                             setTimeout(function() {
-                                var $newAttachment = $(".attachment[data-id='" + newAttachmentId + "']");
-                                if ($newAttachment.length) {
-                                    $newAttachment.get(0).scrollIntoView();
-                                    // Добавляем подсветку для нового элемента
-                                    $newAttachment.addClass("highlighted");
+                                var $attachment = $(".attachment[data-id='" + attachmentId + "']");
+                                if ($attachment.length) {
+                                    $attachment.get(0).scrollIntoView();
+                                    // Добавляем подсветку для элемента
+                                    $attachment.addClass("highlighted");
                                     setTimeout(function() {
-                                        $newAttachment.removeClass("highlighted");
+                                        $attachment.removeClass("highlighted");
                                     }, 2000);
                                 }
                             }, 300);
@@ -129,25 +146,35 @@ jQuery(document).ready(function($) {
                 return;
             }
             
-            $this.find(".attachment-info").append(
-                "<div class=\"fixed-optimize-container\">" +
-                    "<h3>Оптимизация изображения</h3>" +
-                    "<div>" +
-                        "<select class=\"fixed-format-select\" id=\"fixed-format-select-" + id + "\">" +
-                            "<option value=\"webp\">WebP формат</option>" +
-                            "<option value=\"original\">Оригинальный формат</option>" +
-                        "</select>" +
-                    "</div>" +
-                    "<div>" +
-                        "<label>Качество: <span id=\"fixed-quality-value-" + id + "\">80%</span></label>" +
-                        "<input type=\"range\" class=\"fixed-quality-slider\" id=\"fixed-quality-slider-" + id + "\" data-id=\"" + id + "\" min=\"1\" max=\"100\" value=\"80\" step=\"1\">" +
-                    "</div>" +
-                    "<div>" +
-                        "<button type=\"button\" class=\"button fixed-optimize-button\" data-id=\"" + id + "\">Оптимизировать</button>" +
-                        "<div id=\"fixed-optimize-result-" + id + "\" class=\"fixed-optimize-result\"></div>" +
-                    "</div>" +
-                "</div>"
-            );
+            // Получаем данные об оптимизации из атрибутов data
+            var hasOptimized = $this.find(".details-image").data("has-optimized") === "yes";
+            var optimizationInfo = $this.find(".details-image").data("optimization-info") || "";
+            
+            var container = $("<div class='fixed-optimize-container'>" +
+                "<h3>Оптимизация изображения</h3>");
+            
+            // Если есть информация об оптимизации, добавляем ее
+            if (hasOptimized && optimizationInfo) {
+                container.append("<div id='fixed-optimization-info-" + id + "' class='fixed-optimization-info'>" + optimizationInfo + "</div>");
+            }
+            
+            container.append("<div>" +
+                "<select class='fixed-format-select' id='fixed-format-select-" + id + "'>" +
+                "<option value='webp'>WebP формат</option>" +
+                "<option value='original'>Оригинальный формат</option>" +
+                "</select>" +
+                "</div>" +
+                "<div>" +
+                "<label>Качество: <span id='fixed-quality-value-" + id + "'>80%</span></label>" +
+                "<input type='range' class='fixed-quality-slider' id='fixed-quality-slider-" + id + "' data-id='" + id + "' min='1' max='100' value='80' step='1'>" +
+                "</div>" +
+                "<div>" +
+                "<button type='button' class='button fixed-optimize-button' data-id='" + id + "' data-has-optimized='" + (hasOptimized ? "yes" : "no") + "'>" + 
+                (hasOptimized ? "Переоптимизировать" : "Оптимизировать") + "</button>" +
+                "<div id='fixed-optimize-result-" + id + "' class='fixed-optimize-result'></div>" +
+                "</div>");
+            
+            $this.find(".attachment-info").append(container);
         });
     }
     
@@ -176,6 +203,6 @@ jQuery(document).ready(function($) {
         setTimeout(addOptimizerToMediaModal, 100);
     });
     
-    // Добавляем стиль для подсветки нового элемента
+    // Добавляем стиль для подсветки элемента
     $("<style>.attachment.highlighted { box-shadow: 0 0 0 3px #0085ba !important; transition: box-shadow 0.3s ease-in-out; }</style>").appendTo("head");
 });

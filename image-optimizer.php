@@ -1,9 +1,9 @@
 <?php
 /**
  * Plugin Name: Fixed Image Optimizer
- * Description: Оптимизирует изображения и конвертирует в WebP без лицензии. Работает во всех местах WordPress.
- * Version: 1.1
- * Author: Slava Sidorov
+ * Description: Оптимизирует изображения и конвертирует в WebP без лицензии. Работает во всех местах WordPress с сохранением в БД.
+ * Version: 1.3
+ * Author: Slava Sidorov (Improved)
  */
 
 if (!defined('ABSPATH')) {
@@ -12,6 +12,9 @@ if (!defined('ABSPATH')) {
 
 class Fixed_Image_Optimizer
 {
+  // Мета-ключи для хранения информации об оптимизированных изображениях
+  const OPTIMIZED_IMAGE_META_KEY = '_fixed_optimized_image_id';
+  const OPTIMIZATION_DATA_META_KEY = '_fixed_optimization_data';
 
   public function __construct()
   {
@@ -30,6 +33,12 @@ class Fixed_Image_Optimizer
 
     // Проверяем наличие файлов при инициализации
     add_action('admin_init', array($this, 'check_plugin_files'));
+
+    // Добавляем фильтр для отображения иконки оптимизированного изображения
+    add_filter('attachment_fields_to_edit', array($this, 'add_optimization_badge'), 10, 2);
+
+    // Обработка удаления вложения для очистки связанных оптимизированных изображений
+    add_action('delete_attachment', array($this, 'delete_optimized_attachments'));
   }
 
   // Подключение скриптов и стилей
@@ -67,7 +76,7 @@ class Fixed_Image_Optimizer
     $css_path = plugin_dir_path(__FILE__) . 'fixed-style.css';
     $js_path = plugin_dir_path(__FILE__) . 'fixed-script.js';
 
-    // CSS содержимое
+    // CSS содержимое с добавлением стилей для значка оптимизации
     $css_content = '.fixed-optimize-button {
     margin-top: 5px !important;
     background: #0085ba !important;
@@ -110,9 +119,29 @@ class Fixed_Image_Optimizer
 .fixed-format-select {
     margin-bottom: 10px;
     width: 100%;
+}
+.fixed-optimization-badge {
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    background: #46b450;
+    color: white;
+    border-radius: 50%;
+    width: 20px;
+    height: 20px;
+    text-align: center;
+    line-height: 20px;
+    font-size: 12px;
+    z-index: 10;
+}
+.fixed-optimization-info {
+    margin-top: 5px;
+    padding: 5px;
+    background-color: #f0f8ff;
+    border-left: 4px solid #0085ba;
 }';
 
-    // JS содержимое - с обновлением и поддержкой WebP
+    // JS содержимое - с обновлением кода для проверки существующих оптимизированных изображений
     $js_content = 'jQuery(document).ready(function($) {
     // Обновление отображения процента качества
     $(document).on("input", ".fixed-quality-slider", function() {
@@ -128,6 +157,9 @@ class Fixed_Image_Optimizer
         var format = $("#fixed-format-select-" + id).val();
         var resultBox = $("#fixed-optimize-result-" + id);
         
+        // Проверяем, есть ли у нас информация о существующем оптимизированном изображении
+        var hasExisting = button.data("has-optimized") === "yes";
+        
         // Отключаем кнопку и показываем, что идет процесс
         button.prop("disabled", true).text("Оптимизация...");
         
@@ -140,13 +172,17 @@ class Fixed_Image_Optimizer
                 id: id,
                 quality: quality,
                 format: format,
-                nonce: fixedOptimizerData.nonce
+                nonce: fixedOptimizerData.nonce,
+                update_existing: hasExisting
             },
             success: function(response) {
                 button.prop("disabled", false).text("Оптимизировать");
                 
                 if (response.success) {
                     resultBox.html(response.data.message).css("border-left-color", "#46b450").show();
+                    
+                    // Обновляем статус оптимизации
+                    button.data("has-optimized", "yes");
                     
                     // Добавляем кнопку обновления страницы
                     if (!$("#fixed-refresh-button-" + id).length) {
@@ -161,25 +197,35 @@ class Fixed_Image_Optimizer
                         button.after(refreshButton);
                     }
                     
+                    // Обновляем отображение оптимизационной информации
+                    if (response.data.optimization_info) {
+                        if ($("#fixed-optimization-info-" + id).length) {
+                            $("#fixed-optimization-info-" + id).html(response.data.optimization_info);
+                        } else {
+                            $("<div>")
+                                .attr("id", "fixed-optimization-info-" + id)
+                                .addClass("fixed-optimization-info")
+                                .html(response.data.optimization_info)
+                                .insertBefore(resultBox);
+                        }
+                    }
+                    
                     // Обновляем отображение изображения в медиа библиотеке
                     if (response.data.attachment_id && response.data.image_url) {
                         // Обновляем предпросмотр изображения, если находимся на странице медиа
-                        var $thumbnail = $(".attachment[data-id=\'" + response.data.attachment_id + "\'] .thumbnail");
+                        var $thumbnail = $(".attachment[data-id=\'" + response.data.original_id + "\'] .thumbnail");
                         if ($thumbnail.length) {
                             // Добавляем timestamp для избежания кеширования
                             var randomParam = "?t=" + new Date().getTime();
-                            $thumbnail.find("img").attr("src", response.data.image_url + randomParam);
+                            
+                            // Если у нас есть бейдж оптимизации, обновляем его, иначе добавляем
+                            if (!$thumbnail.find(".fixed-optimization-badge").length) {
+                                $thumbnail.append("<div class=\'fixed-optimization-badge\' title=\'Оптимизировано\'>✓</div>");
+                            }
                         }
                         
-                        // Обновляем предпросмотр в деталях
-                        var $detailImage = $(".attachment-details .details-image");
-                        if ($detailImage.length) {
-                            var randomParam = "?t=" + new Date().getTime();
-                            $detailImage.attr("src", response.data.image_url + randomParam);
-                        }
-                        
-                        // Обновляем медиатеку для отображения нового изображения
-                        refreshMediaLibrary(response.data.attachment_id);
+                        // Обновляем медиатеку
+                        refreshMediaLibrary(response.data.original_id);
                     }
                 } else {
                     resultBox.html("Ошибка: " + response.data).css("border-left-color", "#dc3232").show();
@@ -192,8 +238,8 @@ class Fixed_Image_Optimizer
         });
     });
     
-    // Функция для обновления медиатеки и отображения нового изображения
-    function refreshMediaLibrary(newAttachmentId) {
+    // Функция для обновления медиатеки
+    function refreshMediaLibrary(attachmentId) {
         // Если мы находимся в медиа библиотеке, обновляем содержимое
         if (wp.media && wp.media.frame) {
             // Используем WordPress Media API для обновления библиотеки
@@ -205,25 +251,25 @@ class Fixed_Image_Optimizer
                 // Принудительное обновление коллекции
                 library.more(true).reset();
                 
-                // Если у нас есть ID нового вложения, ждем пока библиотека загрузится и выбираем его
-                if (newAttachmentId) {
+                // Если у нас есть ID вложения, ждем пока библиотека загрузится и выбираем его
+                if (attachmentId) {
                     var checkLibrary = setInterval(function() {
-                        var attachment = wp.media.attachment(newAttachmentId);
+                        var attachment = wp.media.attachment(attachmentId);
                         if (attachment.id) {
                             clearInterval(checkLibrary);
                             
-                            // Выделение нового элемента
+                            // Выделение элемента
                             selection.reset([attachment]);
                             
-                            // Прокручиваем к новому элементу
+                            // Прокручиваем к элементу
                             setTimeout(function() {
-                                var $newAttachment = $(".attachment[data-id=\'" + newAttachmentId + "\']");
-                                if ($newAttachment.length) {
-                                    $newAttachment.get(0).scrollIntoView();
-                                    // Добавляем подсветку для нового элемента
-                                    $newAttachment.addClass("highlighted");
+                                var $attachment = $(".attachment[data-id=\'" + attachmentId + "\']");
+                                if ($attachment.length) {
+                                    $attachment.get(0).scrollIntoView();
+                                    // Добавляем подсветку для элемента
+                                    $attachment.addClass("highlighted");
                                     setTimeout(function() {
-                                        $newAttachment.removeClass("highlighted");
+                                        $attachment.removeClass("highlighted");
                                     }, 2000);
                                 }
                             }, 300);
@@ -244,25 +290,35 @@ class Fixed_Image_Optimizer
                 return;
             }
             
-            $this.find(".attachment-info").append(
-                "<div class=\"fixed-optimize-container\">" +
-                    "<h3>Оптимизация изображения</h3>" +
-                    "<div>" +
-                        "<select class=\"fixed-format-select\" id=\"fixed-format-select-" + id + "\">" +
-                            "<option value=\"webp\">WebP формат</option>" +
-                            "<option value=\"original\">Оригинальный формат</option>" +
-                        "</select>" +
-                    "</div>" +
-                    "<div>" +
-                        "<label>Качество: <span id=\"fixed-quality-value-" + id + "\">80%</span></label>" +
-                        "<input type=\"range\" class=\"fixed-quality-slider\" id=\"fixed-quality-slider-" + id + "\" data-id=\"" + id + "\" min=\"1\" max=\"100\" value=\"80\" step=\"1\">" +
-                    "</div>" +
-                    "<div>" +
-                        "<button type=\"button\" class=\"button fixed-optimize-button\" data-id=\"" + id + "\">Оптимизировать</button>" +
-                        "<div id=\"fixed-optimize-result-" + id + "\" class=\"fixed-optimize-result\"></div>" +
-                    "</div>" +
-                "</div>"
-            );
+            // Получаем данные об оптимизации из атрибутов data
+            var hasOptimized = $this.find(".details-image").data("has-optimized") === "yes";
+            var optimizationInfo = $this.find(".details-image").data("optimization-info") || "";
+            
+            var container = $("<div class=\'fixed-optimize-container\'>" +
+                "<h3>Оптимизация изображения</h3>");
+            
+            // Если есть информация об оптимизации, добавляем ее
+            if (hasOptimized && optimizationInfo) {
+                container.append("<div id=\'fixed-optimization-info-" + id + "\' class=\'fixed-optimization-info\'>" + optimizationInfo + "</div>");
+            }
+            
+            container.append("<div>" +
+                "<select class=\'fixed-format-select\' id=\'fixed-format-select-" + id + "\'>" +
+                "<option value=\'webp\'>WebP формат</option>" +
+                "<option value=\'original\'>Оригинальный формат</option>" +
+                "</select>" +
+                "</div>" +
+                "<div>" +
+                "<label>Качество: <span id=\'fixed-quality-value-" + id + "\'>80%</span></label>" +
+                "<input type=\'range\' class=\'fixed-quality-slider\' id=\'fixed-quality-slider-" + id + "\' data-id=\'" + id + "\' min=\'1\' max=\'100\' value=\'80\' step=\'1\'>" +
+                "</div>" +
+                "<div>" +
+                "<button type=\'button\' class=\'button fixed-optimize-button\' data-id=\'" + id + "\' data-has-optimized=\'" + (hasOptimized ? "yes" : "no") + "\'>" + 
+                (hasOptimized ? "Переоптимизировать" : "Оптимизировать") + "</button>" +
+                "<div id=\'fixed-optimize-result-" + id + "\' class=\'fixed-optimize-result\'></div>" +
+                "</div>");
+            
+            $this.find(".attachment-info").append(container);
         });
     }
     
@@ -291,7 +347,7 @@ class Fixed_Image_Optimizer
         setTimeout(addOptimizerToMediaModal, 100);
     });
     
-    // Добавляем стиль для подсветки нового элемента
+    // Добавляем стиль для подсветки элемента
     $("<style>.attachment.highlighted { box-shadow: 0 0 0 3px #0085ba !important; transition: box-shadow 0.3s ease-in-out; }</style>").appendTo("head");
 });';
 
@@ -320,8 +376,37 @@ class Fixed_Image_Optimizer
       return $meta;
     }
 
+    // Проверяем, есть ли уже оптимизированная версия
+    $optimized_id = get_post_meta($post->ID, self::OPTIMIZED_IMAGE_META_KEY, true);
+    $has_optimized = !empty($optimized_id) && get_post($optimized_id);
+    $optimization_data = get_post_meta($post->ID, self::OPTIMIZATION_DATA_META_KEY, true);
+
+    $optimization_info = '';
+    if ($has_optimized && !empty($optimization_data)) {
+      $format = isset($optimization_data['format']) ? esc_html($optimization_data['format']) : 'unknown';
+      $quality = isset($optimization_data['quality']) ? intval($optimization_data['quality']) : 0;
+      $saved_percent = isset($optimization_data['saved_percent']) ? intval($optimization_data['saved_percent']) : 0;
+      $dimensions = isset($optimization_data['dimensions']) ? esc_html($optimization_data['dimensions']) : '';
+
+      $optimized_url = wp_get_attachment_url($optimized_id);
+
+      $optimization_info = sprintf(
+        'Формат: %s, Качество: %d%%, Экономия: %d%%. <a href="%s" target="_blank">Просмотреть</a>',
+        $format,
+        $quality,
+        $saved_percent,
+        $dimensions,
+        esc_url($optimized_url)
+      );
+    }
+
     $optimizer_html = '<div class="fixed-optimize-container">';
     $optimizer_html .= '<h3>Оптимизация изображения</h3>';
+
+    if ($has_optimized) {
+      $optimizer_html .= '<div id="fixed-optimization-info-' . esc_attr($post->ID) . '" class="fixed-optimization-info">' . $optimization_info . '</div>';
+    }
+
     $optimizer_html .= '<div>';
     $optimizer_html .= '<select class="fixed-format-select" id="fixed-format-select-' . esc_attr($post->ID) . '">';
     $optimizer_html .= '<option value="webp">WebP формат</option>';
@@ -330,7 +415,7 @@ class Fixed_Image_Optimizer
     $optimizer_html .= '</div>';
     $optimizer_html .= '<div><label>Качество: <span id="fixed-quality-value-' . esc_attr($post->ID) . '">80%</span></label>';
     $optimizer_html .= '<input type="range" class="fixed-quality-slider" id="fixed-quality-slider-' . esc_attr($post->ID) . '" data-id="' . esc_attr($post->ID) . '" min="1" max="100" value="80" step="1"></div>';
-    $optimizer_html .= '<div><button type="button" class="button fixed-optimize-button" data-id="' . esc_attr($post->ID) . '">Оптимизировать</button>';
+    $optimizer_html .= '<div><button type="button" class="button fixed-optimize-button" data-id="' . esc_attr($post->ID) . '" data-has-optimized="' . ($has_optimized ? 'yes' : 'no') . '">' . ($has_optimized ? 'Переоптимизировать' : 'Оптимизировать') . '</button>';
     $optimizer_html .= '<div id="fixed-optimize-result-' . esc_attr($post->ID) . '" class="fixed-optimize-result"></div></div>';
     $optimizer_html .= '</div>';
 
@@ -359,10 +444,19 @@ class Fixed_Image_Optimizer
               return;
             }
 
-            $this.append(
-              '<div class="fixed-optimize-container">' +
-              '<h3>Оптимизация изображения</h3>' +
-              '<div>' +
+            // Получаем информацию о том, есть ли уже оптимизированное изображение
+            var hasOptimized = $this.closest('.attachment-details').find('.details-image').data('has-optimized') === 'yes';
+            var optimizationInfo = $this.closest('.attachment-details').find('.details-image').data('optimization-info') || '';
+
+            var container = $('<div class="fixed-optimize-container">' +
+              '<h3>Оптимизация изображения</h3>');
+
+            // Если есть информация об оптимизации, добавляем ее
+            if (hasOptimized && optimizationInfo) {
+              container.append('<div id="fixed-optimization-info-' + id + '" class="fixed-optimization-info">' + optimizationInfo + '</div>');
+            }
+
+            container.append('<div>' +
               '<select class="fixed-format-select" id="fixed-format-select-' + id + '">' +
               '<option value="webp">WebP формат</option>' +
               '<option value="original">Оригинальный формат</option>' +
@@ -373,11 +467,12 @@ class Fixed_Image_Optimizer
               '<input type="range" class="fixed-quality-slider" id="fixed-quality-slider-' + id + '" data-id="' + id + '" min="1" max="100" value="80" step="1">' +
               '</div>' +
               '<div>' +
-              '<button type="button" class="button fixed-optimize-button" data-id="' + id + '">Оптимизировать</button>' +
+              '<button type="button" class="button fixed-optimize-button" data-id="' + id + '" data-has-optimized="' + (hasOptimized ? 'yes' : 'no') + '">' +
+              (hasOptimized ? 'Переоптимизировать' : 'Оптимизировать') + '</button>' +
               '<div id="fixed-optimize-result-' + id + '" class="fixed-optimize-result"></div>' +
-              '</div>' +
-              '</div>'
-            );
+              '</div>');
+
+            $this.append(container);
           });
         }
 
@@ -405,6 +500,70 @@ class Fixed_Image_Optimizer
     <?php
   }
 
+  // Добавление значка оптимизации к изображениям в медиа-библиотеке
+  public function add_optimization_badge($form_fields, $post)
+  {
+    if (wp_attachment_is_image($post->ID)) {
+      $optimized_id = get_post_meta($post->ID, self::OPTIMIZED_IMAGE_META_KEY, true);
+      if (!empty($optimized_id) && get_post($optimized_id)) {
+        // Получаем данные оптимизации
+        $optimization_data = get_post_meta($post->ID, self::OPTIMIZATION_DATA_META_KEY, true);
+        $optimization_info = '';
+
+        if (!empty($optimization_data)) {
+          $format = isset($optimization_data['format']) ? esc_html($optimization_data['format']) : 'unknown';
+          $quality = isset($optimization_data['quality']) ? intval($optimization_data['quality']) : 0;
+          $saved_percent = isset($optimization_data['saved_percent']) ? intval($optimization_data['saved_percent']) : 0;
+          $dimensions = isset($optimization_data['dimensions']) ? esc_html($optimization_data['dimensions']) : '';
+
+          $optimization_info = sprintf(
+            'Формат: %s, Качество: %d%%, Экономия: %d%%',
+            $format,
+            $quality,
+            $saved_percent,
+            $dimensions
+          );
+        }
+
+        // Добавляем данные для JavaScript
+        add_action('admin_footer', function () use ($post, $optimization_info) {
+          ?>
+          <script>
+            jQuery(document).ready(function ($) {
+              // Добавляем атрибуты data к изображению
+              $('.attachment[data-id="<?php echo esc_js($post->ID); ?>"] .thumbnail').append('<div class="fixed-optimization-badge" title="Оптимизировано">✓</div>');
+              $('.attachment-details[data-id="<?php echo esc_js($post->ID); ?>"] .details-image, .attachment[data-id="<?php echo esc_js($post->ID); ?>"] .thumbnail img').attr({
+                'data-has-optimized': 'yes',
+                'data-optimization-info': '<?php echo esc_js($optimization_info); ?>'
+              });
+            });
+          </script>
+          <?php
+        });
+
+        // Добавляем информацию об оптимизации в поля формы
+        $form_fields['fixed_optimized'] = array(
+          'label' => 'Оптимизировано',
+          'input' => 'html',
+          'html' => '<span style="color: #46b450;">✓ ' . esc_html($optimization_info) . '</span>'
+        );
+      }
+    }
+    return $form_fields;
+  }
+
+  // Обработка удаления вложения для очистки связанных оптимизированных изображений
+  public function delete_optimized_attachments($post_id)
+  {
+    // Получаем ID оптимизированного изображения
+    $optimized_id = get_post_meta($post_id, self::OPTIMIZED_IMAGE_META_KEY, true);
+
+    // Если существует оптимизированное изображение, удаляем его
+    if (!empty($optimized_id)) {
+      wp_delete_attachment($optimized_id, true);
+    }
+  }
+
   // Обработка AJAX запроса на оптимизацию
   public function ajax_optimize_image()
   {
@@ -418,6 +577,7 @@ class Fixed_Image_Optimizer
     $attachment_id = isset($_POST['id']) ? intval($_POST['id']) : 0;
     $quality = isset($_POST['quality']) ? intval($_POST['quality']) : 80;
     $format = isset($_POST['format']) ? sanitize_text_field($_POST['format']) : 'webp';
+    $update_existing = isset($_POST['update_existing']) && $_POST['update_existing'] === 'yes';
 
     // Ограничиваем качество в рамках допустимого диапазона
     $quality = max(1, min(100, $quality));
@@ -438,284 +598,212 @@ class Fixed_Image_Optimizer
       wp_send_json_error('Библиотека GD не найдена или не поддерживает нужные функции');
     }
 
-    // Получаем размеры изображения
-    $image_size = @getimagesize($image_path);
-    if (!$image_size) {
-      wp_send_json_error('Не удалось получить размеры изображения');
+    // Получаем существующее оптимизированное изображение, если есть
+    $existing_optimized_id = get_post_meta($attachment_id, self::OPTIMIZED_IMAGE_META_KEY, true);
+
+    // Если нам нужно обновить существующее, сначала удаляем старое
+    if ($update_existing && !empty($existing_optimized_id)) {
+      wp_delete_attachment($existing_optimized_id, true);
     }
 
-    list($width, $height) = $image_size;
+    // Загружаем изображение в зависимости от его типа
+    $image_type = exif_imagetype($image_path);
+    $image = null;
 
-    // Определяем новые размеры с соблюдением пропорций
-    $new_dimensions = $this->calculate_dimensions($width, $height, 1920, 1080);
-    $new_width = $new_dimensions['width'];
-    $new_height = $new_dimensions['height'];
+    switch ($image_type) {
+      case IMAGETYPE_JPEG:
+        $image = imagecreatefromjpeg($image_path);
+        break;
+      case IMAGETYPE_PNG:
+        $image = imagecreatefrompng($image_path);
+        // Сохраняем прозрачность для PNG
+        imagealphablending($image, false);
+        imagesavealpha($image, true);
+        break;
+      case IMAGETYPE_WEBP:
+        $image = imagecreatefromwebp($image_path);
+        break;
+      default:
+        wp_send_json_error('Неподдерживаемый тип изображения');
+        break;
+    }
 
-    // Информация о исходном файле
-    $file_info = pathinfo($image_path);
-    $uploads_dir = wp_upload_dir();
+    if (!$image) {
+      wp_send_json_error('Не удалось загрузить изображение');
+    }
 
-    // Определяем расширение нового файла в зависимости от выбранного формата
-    $output_extension = ($format === 'webp') ? 'webp' : $file_info['extension'];
-    $new_filename = $file_info['filename'] . '-optimized.' . $output_extension;
-    $new_file_path = $file_info['dirname'] . '/' . $new_filename;
+    // Устанавливаем максимальные размеры
+    $max_width = 1920;
+    $max_height = 1080;
 
-    // Создаем оптимизированное изображение
+    // Получаем текущие размеры
+    $original_width = imagesx($image);
+    $original_height = imagesy($image);
+
+    // Вычисляем новые размеры с сохранением пропорций
+    $new_width = $original_width;
+    $new_height = $original_height;
+
+    // Изменяем размер, если изображение превышает допустимые размеры
+    if ($original_width > $max_width || $original_height > $max_height) {
+      // Вычисляем коэффициенты масштабирования
+      $width_ratio = $max_width / $original_width;
+      $height_ratio = $max_height / $original_height;
+
+      // Выбираем наименьший коэффициент для сохранения пропорций
+      $scale_ratio = min($width_ratio, $height_ratio);
+
+      // Вычисляем новые размеры
+      $new_width = round($original_width * $scale_ratio);
+      $new_height = round($original_height * $scale_ratio);
+    }
+
+    // Создаем новое изображение с новыми размерами
+    $resized_image = imagecreatetruecolor($new_width, $new_height);
+
+    // Сохраняем прозрачность для PNG
+    if ($image_type === IMAGETYPE_PNG) {
+      imagealphablending($resized_image, false);
+      imagesavealpha($resized_image, true);
+      $transparent = imagecolorallocatealpha($resized_image, 255, 255, 255, 127);
+      imagefilledrectangle($resized_image, 0, 0, $new_width, $new_height, $transparent);
+    }
+
+    // Выполняем изменение размера
+    imagecopyresampled(
+      $resized_image,
+      $image,
+      0,
+      0,
+      0,
+      0,
+      $new_width,
+      $new_height,
+      $original_width,
+      $original_height
+    );
+
+    // Освобождаем память от оригинального изображения
+    imagedestroy($image);
+
+    // Используем измененное изображение для дальнейшей оптимизации
+    $image = $resized_image;
+
+    // Определяем путь к uploads директории
+    $upload_dir = wp_upload_dir();
+    $original_filename = basename($image_path);
+    $filename_without_ext = pathinfo($original_filename, PATHINFO_FILENAME);
+
+    // Определяем расширение файла в зависимости от выбранного формата
+    $new_extension = ($format === 'webp') ? 'webp' : pathinfo($original_filename, PATHINFO_EXTENSION);
+    $new_filename = $filename_without_ext . '-optimized.' . $new_extension;
+    $new_filepath = $upload_dir['path'] . '/' . $new_filename;
+
+    // Создаем директорию, если она не существует
+    if (!file_exists($upload_dir['path'])) {
+      wp_mkdir_p($upload_dir['path']);
+    }
+
+    // Сохраняем оптимизированное изображение
+    $success = false;
     if ($format === 'webp') {
-      $result = $this->create_webp_image($image_path, $new_file_path, $new_width, $new_height, $quality);
+      $success = imagewebp($image, $new_filepath, $quality);
     } else {
-      $result = $this->create_optimized_image($image_path, $new_file_path, $new_width, $new_height, $quality);
-    }
-
-    if ($result) {
-      // Добавляем новое изображение в медиатеку
-      $attachment = $this->create_attachment($new_file_path, $attachment_id, $format);
-
-      if ($attachment) {
-        // Формируем текст для вывода
-        $original_size = filesize($image_path);
-        $optimized_size = filesize($new_file_path);
-        $saved_percent = round(100 - ($optimized_size / $original_size * 100));
-
-        $image_url = wp_get_attachment_url($attachment);
-
-        $message = sprintf(
-          'Успешно оптимизировано! Новый размер: %dx%d. Сохранено: %d%%. <a href="%s" target="_blank">Просмотреть</a>',
-          $new_width,
-          $new_height,
-          $saved_percent,
-          esc_url($image_url)
-        );
-
-        wp_send_json_success(array(
-          'message' => $message,
-          'attachment_id' => $attachment,
-          'image_url' => $image_url
-        ));
-      } else {
-        wp_send_json_error('Ошибка при создании вложения в медиатеке');
+      switch ($image_type) {
+        case IMAGETYPE_JPEG:
+          $success = imagejpeg($image, $new_filepath, $quality);
+          break;
+        case IMAGETYPE_PNG:
+          // Для PNG качество от 0 до 9, где 0 - без сжатия, 9 - максимальное сжатие
+          $png_quality = 9 - round($quality / 100 * 9);
+          $success = imagepng($image, $new_filepath, $png_quality);
+          break;
+        case IMAGETYPE_WEBP:
+          $success = imagewebp($image, $new_filepath, $quality);
+          break;
       }
-    } else {
-      wp_send_json_error('Ошибка при создании оптимизированного изображения');
-    }
-  }
-
-  // Расчет новых размеров с сохранением пропорций
-  private function calculate_dimensions($width, $height, $max_width, $max_height)
-  {
-    // Если изображение уже в пределах допустимых размеров
-    if ($width <= $max_width && $height <= $max_height) {
-      return array('width' => $width, 'height' => $height);
-    }
-
-    $ratio = $width / $height;
-
-    if ($width > $max_width) {
-      $width = $max_width;
-      $height = $width / $ratio;
-    }
-
-    if ($height > $max_height) {
-      $height = $max_height;
-      $width = $height * $ratio;
-    }
-
-    return array('width' => round($width), 'height' => round($height));
-  }
-
-  // Создание изображения WebP
-  private function create_webp_image($source_path, $dest_path, $new_width, $new_height, $quality)
-  {
-    $image_type = exif_imagetype($source_path);
-    $image = null;
-
-    // Создаем ресурс изображения в зависимости от формата
-    switch ($image_type) {
-      case IMAGETYPE_JPEG:
-        $image = @imagecreatefromjpeg($source_path);
-        break;
-      case IMAGETYPE_PNG:
-        $image = @imagecreatefrompng($source_path);
-        if ($image) {
-          // Для PNG сохраняем прозрачность
-          imagepalettetotruecolor($image);
-          imagealphablending($image, true);
-          imagesavealpha($image, true);
-        }
-        break;
-      case IMAGETYPE_WEBP:
-        $image = @imagecreatefromwebp($source_path);
-        break;
-      default:
-        return false;
-    }
-
-    if (!$image) {
-      return false;
-    }
-
-    // Создаем новое изображение с требуемыми размерами
-    $new_image = imagecreatetruecolor($new_width, $new_height);
-
-    if (!$new_image) {
-      imagedestroy($image);
-      return false;
-    }
-
-    // Сохраняем прозрачность для PNG
-    if ($image_type === IMAGETYPE_PNG) {
-      imagepalettetotruecolor($new_image);
-      imagealphablending($new_image, false);
-      imagesavealpha($new_image, true);
-    }
-
-    // Изменяем размер изображения
-    imagecopyresampled(
-      $new_image,
-      $image,
-      0,
-      0,
-      0,
-      0,
-      $new_width,
-      $new_height,
-      imagesx($image),
-      imagesy($image)
-    );
-
-    // Сохраняем в формате WebP
-    $result = imagewebp($new_image, $dest_path, $quality);
-
-    // Освобождаем память
-    imagedestroy($image);
-    imagedestroy($new_image);
-
-    return $result;
-  }
-
-  // Создание оптимизированного изображения в оригинальном формате
-  private function create_optimized_image($source_path, $dest_path, $new_width, $new_height, $quality)
-  {
-    $image_type = exif_imagetype($source_path);
-    $image = null;
-
-    // Создаем ресурс изображения в зависимости от формата
-    switch ($image_type) {
-      case IMAGETYPE_JPEG:
-        $image = @imagecreatefromjpeg($source_path);
-        break;
-      case IMAGETYPE_PNG:
-        $image = @imagecreatefrompng($source_path);
-        if ($image) {
-          // Для PNG сохраняем прозрачность
-          imagepalettetotruecolor($image);
-          imagealphablending($image, true);
-          imagesavealpha($image, true);
-        }
-        break;
-      case IMAGETYPE_WEBP:
-        $image = @imagecreatefromwebp($source_path);
-        break;
-      default:
-        return false;
-    }
-
-    if (!$image) {
-      return false;
-    }
-
-    // Создаем новое изображение с требуемыми размерами
-    $new_image = imagecreatetruecolor($new_width, $new_height);
-
-    if (!$new_image) {
-      imagedestroy($image);
-      return false;
-    }
-
-    // Сохраняем прозрачность для PNG
-    if ($image_type === IMAGETYPE_PNG) {
-      imagepalettetotruecolor($new_image);
-      imagealphablending($new_image, false);
-      imagesavealpha($new_image, true);
-    }
-
-    // Изменяем размер изображения
-    imagecopyresampled(
-      $new_image,
-      $image,
-      0,
-      0,
-      0,
-      0,
-      $new_width,
-      $new_height,
-      imagesx($image),
-      imagesy($image)
-    );
-
-    // Сохраняем в соответствующем формате
-    $result = false;
-    switch ($image_type) {
-      case IMAGETYPE_JPEG:
-        $result = imagejpeg($new_image, $dest_path, $quality);
-        break;
-      case IMAGETYPE_PNG:
-        // Преобразуем качество для PNG (0-9)
-        $png_quality = 9 - round(($quality / 100) * 9);
-        $result = imagepng($new_image, $dest_path, $png_quality);
-        break;
-      case IMAGETYPE_WEBP:
-        $result = imagewebp($new_image, $dest_path, $quality);
-        break;
     }
 
     // Освобождаем память
     imagedestroy($image);
-    imagedestroy($new_image);
 
-    return $result;
-  }
-
-  // Добавление изображения в медиатеку
-  private function create_attachment($file_path, $parent_id, $format)
-  {
-    $file_name = basename($file_path);
-    $attachment_title = sanitize_file_name(pathinfo($file_name, PATHINFO_FILENAME));
-
-    // Получаем путь относительно директории uploads
-    $uploads_dir = wp_upload_dir();
-    $rel_path = str_replace($uploads_dir['basedir'] . '/', '', $file_path);
-
-    // Определяем MIME-тип для нового файла
-    $mime_type = 'image/webp';
-    if ($format !== 'webp') {
-      $file_type = wp_check_filetype($file_path);
-      $mime_type = $file_type['type'];
+    if (!$success) {
+      wp_send_json_error('Не удалось сохранить оптимизированное изображение');
     }
 
+    // Получаем размер оригинального файла
+    $original_size = filesize($image_path);
+
+    // Получаем размер оптимизированного файла
+    $optimized_size = filesize($new_filepath);
+
+    // Вычисляем процент экономии
+    $saved_percent = round(($original_size - $optimized_size) / $original_size * 100);
+
+    // Добавляем изображение в медиа-библиотеку
     $attachment = array(
-      'guid' => $uploads_dir['baseurl'] . '/' . $rel_path,
-      'post_mime_type' => $mime_type,
-      'post_title' => $attachment_title,
+      'guid' => $upload_dir['url'] . '/' . $new_filename,
+      'post_mime_type' => $format === 'webp' ? 'image/webp' : mime_content_type($new_filepath),
+      'post_title' => $filename_without_ext . ' (оптимизировано)',
       'post_content' => '',
       'post_status' => 'inherit'
     );
 
-    // Вставляем запись вложения в базу данных
-    $attachment_id = wp_insert_attachment($attachment, $file_path);
+    $optimized_id = wp_insert_attachment($attachment, $new_filepath);
 
-    if (!$attachment_id) {
-      return false;
+    if (is_wp_error($optimized_id)) {
+      @unlink($new_filepath);
+      wp_send_json_error('Не удалось добавить оптимизированное изображение в медиа-библиотеку');
     }
 
-    // Генерируем метаданные для изображения
+    // Генерируем метаданные для вложения
     require_once(ABSPATH . 'wp-admin/includes/image.php');
-    $attachment_data = wp_generate_attachment_metadata($attachment_id, $file_path);
-    wp_update_attachment_metadata($attachment_id, $attachment_data);
+    $attach_data = wp_generate_attachment_metadata($optimized_id, $new_filepath);
+    wp_update_attachment_metadata($optimized_id, $attach_data);
 
-    return $attachment_id;
+    // Сохраняем связь между оригинальным и оптимизированным изображениями
+    update_post_meta($attachment_id, self::OPTIMIZED_IMAGE_META_KEY, $optimized_id);
+
+    // Сохраняем информацию об оптимизации
+    $optimization_data = array(
+      'format' => $format === 'webp' ? 'WebP' : mime_content_type($new_filepath),
+      'quality' => $quality,
+      'saved_percent' => $saved_percent,
+      'original_dimensions' => $original_width . 'x' . $original_height,
+      'new_dimensions' => $new_width . 'x' . $new_height,
+      'original_size' => size_format($original_size),
+      'optimized_size' => size_format($optimized_size),
+      'timestamp' => current_time('timestamp')
+    );
+
+    update_post_meta($attachment_id, self::OPTIMIZATION_DATA_META_KEY, $optimization_data);
+
+    // Формируем информацию об оптимизации для отображения
+    $optimization_info = sprintf(
+      'Формат: %s, Качество: %d%%, Экономия: %d%%<br>Исходный размер: %s → Новый размер: %s<br>Размер файла: %s → %s',
+      $optimization_data['format'],
+      $quality,
+      $saved_percent,
+      $optimization_data['original_dimensions'],
+      $optimization_data['new_dimensions'],
+      $optimization_data['original_size'],
+      $optimization_data['optimized_size']
+    );
+
+    // Получаем URL оптимизированного изображения
+    $optimized_url = wp_get_attachment_url($optimized_id);
+
+    // Возвращаем успешный результат
+    wp_send_json_success(array(
+      'message' => 'Изображение успешно оптимизировано и сохранено',
+      'optimization_info' => $optimization_info,
+      'optimized_url' => $optimized_url,
+      'original_id' => $attachment_id,
+      'attachment_id' => $optimized_id,
+      'image_url' => $optimized_url
+    ));
   }
 }
 
 // Инициализация плагина
-$fixed_image_optimizer = new Fixed_Image_Optimizer();
+new Fixed_Image_Optimizer();
